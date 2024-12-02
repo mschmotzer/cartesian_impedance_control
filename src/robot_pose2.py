@@ -70,7 +70,7 @@ class RobotTrajectoryLogger(Node):
         np.set_printoptions(precision=8)
         self.transformation_matrix=np.eye(4)
         self.zero_pos =[0.2, 0.2, 0.3] #[0.4, 0.0, 0.4] 
-        self.zero_orientation = [0.7071, 0.7071, 0.0, 0.0] 
+        self.zero_orientation = [0.7071,    0.7071, 0.0, 0.0] 
         self.reference_pose.position.x =  self.zero_pos[0] #0.4
         self.reference_pose.position.y =  self.zero_pos[1] #0.7
         self.reference_pose.position.z =  self.zero_pos[2] #0.4
@@ -112,7 +112,7 @@ class RobotTrajectoryLogger(Node):
             exit()
         # Initialize MediaPipe Hand tracking
         self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(static_image_mode=False, min_detection_confidence=0.6)
+        self.hands = self.mp_hands.Hands(static_image_mode=False, min_detection_confidence=0.7)
         self.mp_drawing = mp.solutions.drawing_utils
         self.runtime_parameters = sl.RuntimeParameters()
         self.image_zed = sl.Mat()
@@ -205,7 +205,6 @@ class RobotTrajectoryLogger(Node):
         if self.first:
             self.first = False
             self.pose_publisher.publish(self.reference_pose)
-            time.sleep(3)
 
             while True:
                 self.pose_publisher.publish(self.reference_pose)
@@ -258,6 +257,8 @@ class RobotTrajectoryLogger(Node):
                 self.start=False
                 self.hand = self.results.multi_hand_landmarks[0]
                 self.wrist=self.hand.landmark[0]
+                confidence = self.results.multi_handedness[0].classification[0].score
+                print(f"Hand detection confidence: {confidence}")
                 self.wrist_x = int(self.wrist.x * self.frame.shape[1])
                 self.wrist_y = int(self.wrist.y * self.frame.shape[0])
                 
@@ -274,9 +275,22 @@ class RobotTrajectoryLogger(Node):
                         self.last_hand_points=np.roll(self.last_hand_points, -1)
                         self.last_hand_points[:,-1] = current_hand_point[:3]
                         self.last_success_pos = self.q[:3]
-                        print("success")
                         cv2.putText(self.frame, f'({current_hand_point[0]},{current_hand_point[1]},{current_hand_point[2]})', (self.wrist_x, self.wrist_y - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        if confidence < 0.9:
+                            direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
+                            distance = np.linalg.norm(direction)  # Calculate the distance
+                            
+                            """   if distance < 0.2:  # Avoid division by zero
+                                print("Robot is already at the hand position.")
+                            else:
+                                step = 0.01 * (direction / distance)  # Normalize and scale by step size
+                                self.reference_pose.position.x += step[0]
+                                self.reference_pose.position.y += step[1]
+                                self.reference_pose.position.z += step[2]
+                                self.calculate_traj([ self.reference_pose.position.x, self.reference_pose.position.y, self.reference_pose.position.z])
+                                self.send_trajectory(time.time() - self.time_start)
+                                self.pose_publisher.publish(self.reference_pose)"""
                 else:
                     self.wait_time = time.time() 
                     # analog wie unten dann anpassen

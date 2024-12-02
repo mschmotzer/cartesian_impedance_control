@@ -317,14 +317,14 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
                     (2.0 * sqrt(nullspace_stiffness_)) * dq_);  // if config control ) false we don't care about the joint position
 
   tau_impedance = jacobian.transpose() * Sm * (F_impedance /*+ F_repulsion + F_potential*/) + jacobian.transpose() * Sf * F_cmd;
-  auto tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
+  //auto tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
 
 
   x_dd_des = Lambda.inverse()*(-K_RMP * error - D_RMP * jacobian * dq_);
   rmp_joint_limit_avoidance();
   get_ddq();
   tau_RMP = M * ddq_;
-  //auto tau_d_placeholder = tau_RMP    + coriolis;
+  auto tau_d_placeholder = tau_RMP    + coriolis;
 
 
 
