@@ -14,11 +14,12 @@
 
 #include <cartesian_impedance_control/cartesian_impedance_controller.hpp>
 
+
+
 #include <cassert>
 #include <cmath>
 #include <exception>
 #include <string>
-
 #include <Eigen/Eigen>
 
 namespace {
@@ -34,7 +35,7 @@ std::ostream& operator<<(std::ostream& ostream, const std::array<T, N>& array) {
 }
 
 namespace cartesian_impedance_control {
-
+rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_publisher_;
 void CartesianImpedanceController::update_stiffness_and_references(){
   //target by filtering
   /** at the moment we do not use dynamic reconfigure and control the robot via D, K and T **/
@@ -47,6 +48,28 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   F_contact_des = 0.05 * F_contact_target + 0.95 * F_contact_des;
 }
 
+void CartesianImpedanceController::rmp_joint_limit_avoidance(){
+  //TODO: Implement the calculation of D_sigma fro joint limits
+  //calculate sigma_u = 1/(1 + exp(-q))
+  for (size_t i = 0; i < 7; ++i) {
+    sigma_u(i) = 1/(1 + exp(-q_(i)));
+    //calculate alpha_u = 1/(1 + exp(-dq_ * c_alpha))
+    alpha_u(i) = 1/(1 + exp(-dq_(i) * c_alpha));
+    //calculate d_ii
+    d_ii(i) = (q_upper_limit(i) - q_lower_limit(i)) * sigma_u(i) * (1 - sigma_u(i));
+    //calculate d_ii_tilde
+    d_ii_tilde(i) = sigma_u(i)*(alpha_u(i)*d_ii(i) + (1 - alpha_u(i))) + (1 - sigma_u(i))*((1- alpha_u(i)) * d_ii(i) + alpha_u(i));
+    //calculate D_sigma
+    D_sigma(i,i) = d_ii_tilde(i);
+  }
+  jacobian_tilde = jacobian * D_sigma;
+  h_joint_limits = D_sigma.inverse() * (gamma_p * (q_0 - q_) - gamma_d * dq_);
+}
+//get global joint acceleration for torque calculation
+void CartesianImpedanceController::get_ddq(){
+  Eigen::MatrixXd I_77 = Eigen::MatrixXd::Identity(7, 7);
+  ddq_ = D_sigma * (jacobian_tilde.transpose()*jacobian_tilde + lambda_RMP * I_77).inverse() * (jacobian_tilde.transpose() *x_dd_des  + lambda_RMP * h_joint_limits);
+}
 
 void CartesianImpedanceController::arrayToMatrix(const std::array<double,7>& inputArray, Eigen::Matrix<double,7,1>& resultMatrix)
 {
@@ -123,8 +146,8 @@ controller_interface::InterfaceConfiguration CartesianImpedanceController::state
 
 CallbackReturn CartesianImpedanceController::on_init() {
    UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T);
-   std::thread input_thread(&UserInputServer::main, input_server_obj, 0, nullptr);
-   input_thread.detach();
+   //std::thread input_thread(&UserInputServer::main, input_server_obj, 0, nullptr);
+   //input_thread.detach();
    return CallbackReturn::SUCCESS;
 }
 
@@ -158,6 +181,12 @@ CallbackReturn CartesianImpedanceController::on_activate(
   const rclcpp_lifecycle::State& /*previous_state*/) {
   franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
 
+  desired_pose_sub = get_node()->create_subscription<geometry_msgs::msg::Pose>(
+        "cartesian_impedance_control/reference_pose", 
+        10,  // Queue size
+        std::bind(&CartesianImpedanceController::reference_pose_callback, this, std::placeholders::_1)
+    );
+
   std::array<double, 16> initial_pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
   Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_pose.data()));
   position_d_ = initial_transform.translation();
@@ -189,6 +218,18 @@ void CartesianImpedanceController::topic_callback(const std::shared_ptr<franka_m
   arrayToMatrix(O_F_ext_hat_K, O_F_ext_hat_K_M);
 }
 
+void CartesianImpedanceController::reference_pose_callback(const geometry_msgs::msg::Pose::SharedPtr msg)
+{
+    // Handle the incoming pose message
+    std::cout << "received reference posistion as " <<  msg->position.x << ", " << msg->position.y << ", " << msg->position.z << std::endl;
+    std::cout << "received reference orientatio as " << msg->orientation.x <<", " << msg->orientation.y<<"  , " << msg->orientation.z<<"  , " << msg->orientation.w<< std::endl;
+    position_d_target_ << msg->position.x, msg->position.y, msg->position.z;
+    orientation_d_target_.coeffs() << msg->orientation.x, msg->orientation.y, msg->orientation.z, msg->orientation.w;
+    // You can add more processing logic here
+    // Update x_d to reflect the new reference poses
+/*     x_d.head(3) = position_d_target_;  // New target position
+    x_d.tail(3) << msg->orientation.x, msg->orientation.y, msg->orientation.z;  // New target orientation */
+}
 void CartesianImpedanceController::updateJointStates() {
   for (auto i = 0; i < num_joints; ++i) {
     const auto& position_interface = state_interfaces_.at(2 * i);
@@ -216,17 +257,19 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   std::array<double, 42> jacobian_array =  franka_robot_model_->getZeroJacobian(franka::Frame::kEndEffector);
   std::array<double, 16> pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
-  Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
+  jacobian = Eigen::Map<Eigen::Matrix<double, 6, 7>> (jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 7>> M(mass.data());
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose.data()));
   Eigen::Vector3d position(transform.translation());
   Eigen::Quaterniond orientation(transform.rotation());
-  orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
+  /*orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
                         * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
-                        * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
+                        * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());*/
+  /*orientation_d_target_ = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX())
+                        * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY())
+                        * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ());*/
   updateJointStates(); 
 
-  
   error.head(3) << position - position_d_;
 
   if (orientation_d_.coeffs().dot(orientation.coeffs()) < 0.0) {
@@ -241,6 +284,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   }
 
   Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();
+  D =  2.05* K.cwiseSqrt() * Lambda.diagonal().cwiseSqrt().asDiagonal();
   // Theta = T*Lambda;
   // F_impedance = -1*(Lambda * Theta.inverse() - IDENTITY) * F_ext;
   //Inertia of the robot
@@ -274,6 +318,16 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
 
   tau_impedance = jacobian.transpose() * Sm * (F_impedance /*+ F_repulsion + F_potential*/) + jacobian.transpose() * Sf * F_cmd;
   auto tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
+
+
+  x_dd_des = Lambda.inverse()*(-K_RMP * error - D_RMP * jacobian * dq_);
+  rmp_joint_limit_avoidance();
+  get_ddq();
+  tau_RMP = M * ddq_;
+  //auto tau_d_placeholder = tau_RMP    + coriolis;
+
+
+
   tau_d << tau_d_placeholder;
   tau_d << saturateTorqueRate(tau_d, tau_J_d_M);  // Saturate torque rate to avoid discontinuities
   tau_J_d_M = tau_d;

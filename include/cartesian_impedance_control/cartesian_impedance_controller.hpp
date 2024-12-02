@@ -59,6 +59,7 @@ namespace cartesian_impedance_control {
 
 class CartesianImpedanceController : public controller_interface::ControllerInterface {
 public:
+  //CartesianImpedanceController();
   [[nodiscard]] controller_interface::InterfaceConfiguration command_interface_configuration()
       const override;
 
@@ -80,18 +81,24 @@ public:
 
     void setPose(const std::shared_ptr<messages_fr3::srv::SetPose::Request> request, 
     std::shared_ptr<messages_fr3::srv::SetPose::Response> response);
-      
+
 
  private:
     //Nodes
     rclcpp::Subscription<franka_msgs::msg::FrankaRobotState>::SharedPtr franka_state_subscriber = nullptr;
+    rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr desired_pose_sub;
     rclcpp::Service<messages_fr3::srv::SetPose>::SharedPtr pose_srv_;
 
 
     //Functions
     void topic_callback(const std::shared_ptr<franka_msgs::msg::FrankaRobotState> msg);
+    void reference_pose_callback(const geometry_msgs::msg::Pose::SharedPtr msg);
     void updateJointStates();
     void update_stiffness_and_references();
+    
+    void get_ddq();
+    void rmp_joint_limit_avoidance();
+
     void arrayToMatrix(const std::array<double, 6>& inputArray, Eigen::Matrix<double, 6, 1>& resultMatrix);
     void arrayToMatrix(const std::array<double, 7>& inputArray, Eigen::Matrix<double, 7, 1>& resultMatrix);
     Eigen::Matrix<double, 7, 1> saturateTorqueRate(const Eigen::Matrix<double, 7, 1>& tau_d_calculated, const Eigen::Matrix<double, 7, 1>& tau_J_d);  
@@ -106,18 +113,56 @@ public:
     Eigen::Matrix<double, 7, 1> q_;
     Eigen::Matrix<double, 7, 1> dq_;
     Eigen::MatrixXd jacobian_transpose_pinv;  
+    Eigen::MatrixXd jacobian;
+	
+
+  //RMP Parameters
+    Eigen::Matrix<double, 7, 1> sigma_u = Eigen::MatrixXd::Zero(7,1);
+    Eigen::Matrix<double, 7, 1> alpha_u = Eigen::MatrixXd::Zero(7,1);
+    Eigen::Matrix<double, 7, 1> d_ii = Eigen::MatrixXd::Zero(7,1);
+    Eigen::Matrix<double, 7, 1> d_ii_tilde = Eigen::MatrixXd::Zero(7,1);
+    Eigen::Matrix<double, 7, 7> D_sigma = Eigen::MatrixXd::Zero(7,7);
+    double c_alpha = 1.0;
+    double c = 0.1;
+    double gamma_p = 15;
+    double gamma_d = 7.7;
+    const Eigen::Matrix<double, 7, 1> q_0= (Eigen::VectorXd(7) << 0.109, -0.189, -0.104, -2.09, -0.0289, 1.90, 0.0189).finished();
+    const Eigen::Matrix<double, 7, 1> q_lower_limit = (Eigen::VectorXd(7) << -2.89725, -1.8326,-2.89725, -3.0718, -2.87979, 0.436332, -3.05433).finished();
+    const Eigen::Matrix<double, 7, 1> q_upper_limit = (Eigen::VectorXd(7) << 2.89725,1.8326, -2.89725, -0.122173, 2.87979, 4.62512, 3.05433).finished();
+    Eigen::Matrix<double, 6, 7> jacobian_tilde = Eigen::MatrixXd::Zero(6,7);
+    Eigen::Matrix<double, 7, 1> h_joint_limits = Eigen::MatrixXd::Zero(7,1);
+    Eigen::Matrix<double, 6, 1> x_dd_des = Eigen::MatrixXd::Zero(6,1);
+    Eigen::Matrix<double, 6, 1> s = Eigen::MatrixXd::Zero(6,1);
+    Eigen::Matrix<double, 6, 1> pose_endeffector = Eigen::MatrixXd::Zero(6,1);
+    Eigen::Matrix<double, 7, 1> u = Eigen::MatrixXd::Zero(7,1);
+    double lambda_RMP = 0.005;
+    Eigen::Matrix<double, 7, 1> ddq_;
+    Eigen::Matrix<double, 7, 1> tau_RMP;
+    Eigen::Matrix<double, 6, 6> K_RMP =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
+                                                                0, 250,   0,   0,   0,   0,
+                                                                0,   0, 250,   0,   0,   0,
+                                                                0,   0,   0, 50,   0,   0,
+                                                                0,   0,   0,   0, 50,   0,
+                                                                0,   0,   0,   0,   0,  20).finished();
+    Eigen::Matrix<double, 6, 6> D_RMP =  (Eigen::MatrixXd(6,6) <<  30,   0,   0,   0,   0,   0,
+                                                                0,  30,   0,   0,   0,   0,
+                                                                0,   0,  30,   0,   0,   0,
+                                                                0,   0,   0,   9,   0,   0,
+                                                                0,   0,   0,   0,   9,   0,
+                                                                0,   0,   0,   0,   0,   6).finished();
 
     //Robot parameters
     const int num_joints = 7;
     const std::string state_interface_name_{"robot_state"};
-    const std::string robot_name_{"panda"};
+    const std::string robot_name_{"fr3"};
     const std::string k_robot_state_interface_name{"robot_state"};
     const std::string k_robot_model_interface_name{"robot_model"};
     franka_hardware::FrankaHardwareInterface interfaceClass;
     std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;
     const double delta_tau_max_{1.0};
     const double dt = 0.001;
-                
+  
+
     //Impedance control variables              
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
@@ -160,7 +205,7 @@ public:
     Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;                                 // impedance damping term
     Eigen::Matrix<double, 6, 6> cartesian_damping_target_;                                   // impedance damping term
     Eigen::Matrix<double, 6, 6> cartesian_inertia_target_;                                   // impedance damping term
-    Eigen::Vector3d position_d_target_ = {0.5, 0.0, 0.5};
+    Eigen::Vector3d position_d_target_ = {0.4, 0.0, 0.4};
     Eigen::Vector3d rotation_d_target_ = {M_PI, 0.0, 0.0};
     Eigen::Quaterniond orientation_d_target_;
     Eigen::Vector3d position_d_;
@@ -197,6 +242,8 @@ public:
 
     //Filter-parameters
     double filter_params_{0.001};
-    int mode_ = 2;
+    int mode_ = 1;
 };
 }  // namespace cartesian_impedance_control
+
+
