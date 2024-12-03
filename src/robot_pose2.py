@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-#Check DIRECRTION AND POSITION
-
-
-
-
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Wrench, Pose
@@ -96,6 +79,7 @@ class RobotTrajectoryLogger(Node):
         self.target = np.zeros(3)
         self.ball_Radius_back = 0.05 #m 
         self.ball_Radius_static = 0.02
+        self.hand_image_ratio = 0.07
         self.wait_time = time.time()
 
         timestamp = datetime.now().strftime("%Y_%m_%d_%H%M")
@@ -233,43 +217,24 @@ class RobotTrajectoryLogger(Node):
             self.results = self.hands.process(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB))
             if self.results.multi_hand_landmarks:
                 
-                if not self.start and (time.time() - self.wait_time > 1.5*self.replacement_time):
-                    if self.prev_case == 2 and  (time.time() - self.time_start) <= self.replacement_time :
-                        self.send_trajectory(time.time() - self.time_start)
-                    elif self.prev_case == 1 and self.inside_ball(self.ball_Radius_back):
-                        self.calculate_traj(self.zero_pos)
-                        print("here:", self.zero_pos)
-                        self.time_start=time.time()
-                        self.send_trajectory(time.time() - self.time_start)
-                        self.prev_case = 2
-                    elif (time.time() - self.time_start) <= self.replacement_time + 1:
-                        self.reference_pose.position.x =  self.zero_pos[0] 
-                        self.reference_pose.position.y =  self.zero_pos[1] 
-                        self.reference_pose.position.z =  self.zero_pos[2]
-                        self.reference_pose.orientation.w = self.zero_orientation[0] 
-                        self.reference_pose.orientation.x = self.zero_orientation[1] 
-                        self.reference_pose.orientation.y = self.zero_orientation[2] 
-                        self.reference_pose.orientation.z = self.zero_orientation[3] 
-                        self.pose_publisher.publish(self.reference_pose)
-                        self.prev_case = 0
-                else:
-                    print("waiting....")
                 self.start=False
                 self.hand = self.results.multi_hand_landmarks[0]
-                self.wrist=self.hand.landmark[0]
+                self.wrist = self.hand.landmark[0]
+                index = self.hand.landmark[5]
                 confidence = self.results.multi_handedness[0].classification[0].score
                 print(f"Hand detection confidence: {confidence}")
                 self.wrist_x = int(self.wrist.x * self.frame.shape[1])
                 self.wrist_y = int(self.wrist.y * self.frame.shape[0])
-                
-                if self.wrist_x > 0 and self.wrist_y > 0:
+                index_x = int(index.x * self.frame.shape[1])
+                index_y = int(index.y * self.frame.shape[0])
+
+                if self.wrist_x > 0 and self.wrist_y > 0 and index_x > 0 and index_y > 0:
                     self.tracking_success= True
                     self.depth_value = self.depth_map.get_value(self.wrist_x, self.wrist_y)[1]      
                     self.z=self.depth_value/1000
                     self.x=(self.wrist_x-self.left_cam_info.cx)*self.z/self.left_cam_info.fx
                     self.y=(self.wrist_y-self.left_cam_info.cy)*self.z/self.left_cam_info.fy
 
-                    #print(f'x:{self.x} y: {self.y} z: {self.z}')
                     if not np.isnan(self.depth_value) and not np.isinf(self.depth_value):
                         current_hand_point= np.dot(self.transf_matrix_0_Cam,np.transpose([self.x, self.y, self.z, 1]))
                         self.last_hand_points=np.roll(self.last_hand_points, -1)
@@ -277,20 +242,39 @@ class RobotTrajectoryLogger(Node):
                         self.last_success_pos = self.q[:3]
                         cv2.putText(self.frame, f'({current_hand_point[0]},{current_hand_point[1]},{current_hand_point[2]})', (self.wrist_x, self.wrist_y - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                        if confidence < 0.9:
-                            direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
-                            distance = np.linalg.norm(direction)  # Calculate the distance
-                            
-                            """   if distance < 0.2:  # Avoid division by zero
-                                print("Robot is already at the hand position.")
-                            else:
+
+                        if not self.start and (time.time() - self.wait_time > 1.5*self.replacement_time):
+                            if self.prev_case == 2 and  (time.time() - self.time_start) <= self.replacement_time :
+                                self.send_trajectory(time.time() - self.time_start)
+                            elif self.prev_case == 1 and self.inside_ball(self.ball_Radius_back):
+                                self.calculate_traj(self.zero_pos)
+                                print("here:", self.zero_pos)
+                                self.time_start=time.time()
+                                self.send_trajectory(time.time() - self.time_start)
+                                self.prev_case = 2
+                            elif (time.time() - self.time_start) <= self.replacement_time + 1:
+                                self.reference_pose.position.x =  self.zero_pos[0] 
+                                self.reference_pose.position.y =  self.zero_pos[1] 
+                                self.reference_pose.position.z =  self.zero_pos[2]
+                                self.reference_pose.orientation.w = self.zero_orientation[0] 
+                                self.reference_pose.orientation.x = self.zero_orientation[1] 
+                                self.reference_pose.orientation.y = self.zero_orientation[2] 
+                                self.reference_pose.orientation.z = self.zero_orientation[3] 
+                                self.pose_publisher.publish(self.reference_pose)
+                                self.prev_case = 0
+                        else:
+                            if np.linalg.norm(np.array([index.x -self.wrist.x, index.y - self.wrist.y])) < self.hand_image_ratio  :
+                                direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
+                                distance = np.linalg.norm(direction)  # Calculate the distance
+                        
                                 step = 0.01 * (direction / distance)  # Normalize and scale by step size
                                 self.reference_pose.position.x += step[0]
                                 self.reference_pose.position.y += step[1]
                                 self.reference_pose.position.z += step[2]
-                                self.calculate_traj([ self.reference_pose.position.x, self.reference_pose.position.y, self.reference_pose.position.z])
-                                self.send_trajectory(time.time() - self.time_start)
-                                self.pose_publisher.publish(self.reference_pose)"""
+                                self.calculate_orientation()
+                                self.pose_publisher.publish(self.reference_pose)
+                            print("waiting....")
+
                 else:
                     self.wait_time = time.time() 
                     # analog wie unten dann anpassen

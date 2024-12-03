@@ -1,1 +1,0 @@
-{"reference_position": {"x": 0.2, "y": 0.2, "z": 0.3}, "euler_angles": {"roll": 1.5707963267948966, "pitch": 0.0, "yaw": 0.0}, "ee_pose": {"position": {"x": 0.0, "y": 0.0, "z": 0.0}, "orientation": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}, "Tracking": {"Success": false}}
