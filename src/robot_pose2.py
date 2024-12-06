@@ -34,7 +34,7 @@ class RobotTrajectoryLogger(Node):
         self.timer_log_data = self.create_timer(1.0 / 10.0, self.log_data)
 
         #Timer for Tracking:
-        self.timer_tracking = self.create_timer(1.0 / 25.0, self.run_tracking)
+        self.timer_tracking = self.create_timer(1.0 / 15.0, self.run_tracking)
 
         # Subscribe to the robot state
         self.subscription = self.create_subscription(
@@ -45,6 +45,7 @@ class RobotTrajectoryLogger(Node):
 
         # Initialize state and variables
         self.first = True
+        self.global_time = time.time()
         self.time_start = time.time()
         self.reference_pose = Pose()
         self.ee_pose = Pose()
@@ -65,7 +66,7 @@ class RobotTrajectoryLogger(Node):
         self.ee_euler_angles = quaternion_to_euler([self.ee_pose.orientation._x, self.ee_pose.orientation._y, self.ee_pose.orientation._z, self.ee_pose.orientation._w])
         self.reference_euler_angles = quaternion_to_euler([self.reference_pose.orientation._x, self.reference_pose.orientation._y, self.reference_pose.orientation._z, self.reference_pose.orientation._w])
         self.start = True   
-        self.memory_points = 5
+        self.memory_points = 8
         self.last_hand_points = np.zeros([3,self.memory_points])
         self.replacement_time = 3 # Seconds
         self.prev_case = 0   # 0 if hand was tracked, 1 if hand is lost, 2 if lost on the way back to zero
@@ -77,11 +78,16 @@ class RobotTrajectoryLogger(Node):
         self.transf_matrix_EE_Cam=np.array([[0,-1, 0, 0],[1,0 , 0,-0.15],[0, 0, 1, 0.122],[0, 0, 0, 1]])
         self.last_success_pos = np.zeros(3)
         self.target = np.zeros(3)
-        self.ball_Radius_back = 0.05 #m 
+        self.ball_Radius_back = 0.03 #m 
         self.ball_Radius_static = 0.02
-        self.hand_image_ratio = 0.07
+        self.hand_image_ratio = 0.12
         self.wait_time = time.time()
-
+        self.lower_red = np.array([0, 130, 80])
+        self.upper_red = np.array([10, 255, 255])        
+        self.lower_yellow = np.array([22, 100, 100])  
+        self.upper_yellow = np.array([28, 255, 255])  
+        self.proximity_threshold = 100
+        self.zoom_in = False
         timestamp = datetime.now().strftime("%Y_%m_%d_%H%M")
         self.log_file = (f"robot_state_log_{timestamp}.json")
         print(self.log_file)
@@ -183,13 +189,85 @@ class RobotTrajectoryLogger(Node):
         
         self.calculate_traj(self.last_t_point)
         self.time_start=time.time()
-        
+    def get_indice(self):
+        for hand_idx, hand_landmarks in enumerate(self.results.multi_hand_landmarks):
+            print("hand index: ", hand_idx)
+            # Wrist landmark index in MediaPipe
+            self.start=False
+            self.hand = self.results.multi_hand_landmarks[self.indice]
+            self.wrist = self.hand.landmark[0]
+            self.index = self.hand.landmark[5]
+            confidence = self.results.multi_handedness[0].classification[0].score
+            print(f"Hand detection confidence: {confidence}")
+            self.wrist_x = int(self.wrist.x * self.frame.shape[1])
+            self.wrist_y = int(self.wrist.y * self.frame.shape[0])
+            self.index_x = int(self.index.x * self.frame.shape[1])
+            self.index_y = int(self.index.y * self.frame.shape[0])
+
+            close_to_red = any(
+                abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= self.proximity_threshold
+                for contour in self.contours_red
+            )
+
+            # Check proximity to yellow contours
+            close_to_yellow = any(
+                abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= self.proximity_threshold
+                for contour in self.contours_yellow
+            )
+
+            # If close to both red and yellow contours, add the hand index to the list
+            if close_to_red and close_to_yellow:
+                self.indice = hand_idx
+                return 1
+        return 0
+    def search_mode(self):
+        self.tracking_success= False
+        self.zoom_in = True
+        if self.prev_case == 2 and self.inside_ball(self.ball_Radius_back):
+
+            self.calculate_traj(self.last_success_pos)
+            self.time_start=time.time()
+            self.send_trajectory(time.time() - self.time_start)
+            print("Lost on the way back")
+            self.prev_case = 1
+
+        elif self.prev_case == 0 and self.inside_ball(self.ball_Radius_static):
+
+            target = self.q
+            target[:2] = self.q[:2] + 0.3*(self.last_hand_points[:2,-1] - self.q[:2])
+            target[2] += 0.3
+            self.calculate_traj(target)
+            self.time_start=time.time()
+            self.send_trajectory(time.time() - self.time_start)
+            self.prev_case = 1
+            print("static cas") 
+
+        elif self.prev_case == 0 or self.prev_case == 2:
+
+            self.find_hand()
+            self.send_trajectory(time.time() - self.time_start)
+            print("mov case")   
+
+        elif (time.time() - self.time_start) <= self.replacement_time:
+            self.send_trajectory(time.time() - self.time_start)
+
+        elif (time.time() - self.time_start) <= self.replacement_time + 2:
+            #just wait
+             print("wait")
+        else:
+            print('Couldnt find hand')
+            exit()
+        self.wait_time = time.time()
+
+
+
+
 
     def run_tracking(self):
         if self.first:
             self.first = False
             self.pose_publisher.publish(self.reference_pose)
-
+            time.sleep(2)
             while True:
                 self.pose_publisher.publish(self.reference_pose)
                 self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
@@ -212,21 +290,23 @@ class RobotTrajectoryLogger(Node):
             self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
             self.frame = self.image_zed.get_data()
             self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
-
+            self.frame_copy = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
             # Process the image with MediaPipe
             self.results = self.hands.process(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB))
-            if self.results.multi_hand_landmarks:
-                
-                self.start=False
-                self.hand = self.results.multi_hand_landmarks[0]
-                self.wrist = self.hand.landmark[0]
-                index = self.hand.landmark[5]
-                confidence = self.results.multi_handedness[0].classification[0].score
-                print(f"Hand detection confidence: {confidence}")
-                self.wrist_x = int(self.wrist.x * self.frame.shape[1])
-                self.wrist_y = int(self.wrist.y * self.frame.shape[0])
-                index_x = int(index.x * self.frame.shape[1])
-                index_y = int(index.y * self.frame.shape[0])
+            
+            #mask colour
+            mask_red = cv2.inRange(self.frame_copy, self.lower_red, self.upper_red)
+            mask_yellow = cv2.inRange(self.frame_copy, self.lower_yellow, self.upper_yellow)
+            self.contours_red, _ = cv2.findContours(mask_red, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            self.contours_yellow, _ = cv2.findContours(mask_yellow, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in self.contours_red:
+                cv2.drawContours(self.frame, [contour], -1, (0, 0, 255), 2)  # Red color in BGR
+            for contour in self.contours_yellow:
+                cv2.drawContours(self.frame, [contour], -1, (0, 255, 255), 2)  # Blue color in BGR
+
+            self.indice = 0
+            if self.results.multi_hand_landmarks and self.get_indice():
+
 
                 if self.wrist_x > 0 and self.wrist_y > 0 and index_x > 0 and index_y > 0:
                     self.tracking_success= True
@@ -246,7 +326,7 @@ class RobotTrajectoryLogger(Node):
                         if not self.start and (time.time() - self.wait_time > 1.5*self.replacement_time):
                             if self.prev_case == 2 and  (time.time() - self.time_start) <= self.replacement_time :
                                 self.send_trajectory(time.time() - self.time_start)
-                            elif self.prev_case == 1 and self.inside_ball(self.ball_Radius_back):
+                            elif self.prev_case == 1 and not self.inside_ball(self.ball_Radius_back):
                                 self.calculate_traj(self.zero_pos)
                                 print("here:", self.zero_pos)
                                 self.time_start=time.time()
@@ -261,9 +341,10 @@ class RobotTrajectoryLogger(Node):
                                 self.reference_pose.orientation.y = self.zero_orientation[2] 
                                 self.reference_pose.orientation.z = self.zero_orientation[3] 
                                 self.pose_publisher.publish(self.reference_pose)
-                                self.prev_case = 0
-                        else:
-                            if np.linalg.norm(np.array([index.x -self.wrist.x, index.y - self.wrist.y])) < self.hand_image_ratio  :
+                                
+                            self.zoom_in= False
+                        elif not self.start and self.zoom_in:
+                            if np.linalg.norm(np.array([self.index.x -self.wrist.x, self.index.y - self.wrist.y])) < self.hand_image_ratio  :
                                 direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
                                 distance = np.linalg.norm(direction)  # Calculate the distance
                         
@@ -273,76 +354,20 @@ class RobotTrajectoryLogger(Node):
                                 self.reference_pose.position.z += step[2]
                                 self.calculate_orientation()
                                 self.pose_publisher.publish(self.reference_pose)
-                            print("waiting....")
-
-                else:
-                    self.wait_time = time.time() 
-                    # analog wie unten dann anpassen
-                    self.tracking_success= False
-
-                    if  not self.inside_ball(self.ball_Radius_static):
-                        self.find_hand()
-                        self.send_trajectory(time.time() - self.time_start)
-
-                    elif self.prev_case == 2:
-
-                        self.calculate_traj(self.last_success_pos)
-                        print(self.last_success_pos)
-                        self.send_trajectory(time.time() - self.time_start)
-                        self.prev_case = 1
-                    
+                                print("come closer")
+                        self.prev_case = 0
                     else:
-                        target = self.q
-                        target[:2] = self.q[:2] + 0.3*(self.last_hand_points[:2,-1] - self.q[:2])
-                        target[2] += 0.3
-                        print(target)
-                        self.calculate_traj(target)
-                        self.send_trajectory(time.time() - self.time_start)
-                        self.prev_case = 1
-    
-            else:
-                self.tracking_success= False
-                self.wait_time = time.time() 
-
-               
-
-                if self.prev_case == 2 and self.inside_ball(self.ball_Radius_back):
-
-                    self.calculate_traj(self.last_success_pos)
-                    self.time_start=time.time()
-                    self.send_trajectory(time.time() - self.time_start)
-                    print("Lost on the way back")
-                    self.prev_case = 1
-
-                elif self.prev_case == 0 and self.inside_ball(self.ball_Radius_static):
-
-                    target = self.q
-                    target[:2] = self.q[:2] + 0.3*(self.last_hand_points[:2,-1] - self.q[:2])
-                    target[2] += 0.3
-                    self.calculate_traj(target)
-                    self.time_start=time.time()
-                    self.send_trajectory(time.time() - self.time_start)
-                    self.prev_case = 1
-                    print("static cas") 
-
-                elif self.prev_case == 0 or self.prev_case == 2:
-
-                    self.find_hand()
-                    self.send_trajectory(time.time() - self.time_start)
-                    print("mov case")   
-
-                elif (time.time() - self.time_start) <= self.replacement_time:
-                    self.send_trajectory(time.time() - self.time_start)
-
-                elif (time.time() - self.time_start) <= self.replacement_time + 2:
-                    #just wait
-                    print("wait")
+                        print("Here_1")
+                        self.search_mode()      
                 else:
-                    print('Couldnt find hand')
-                    exit()
-
+                    print("Here_2")
+                    self.search_mode()   
+            else:
+                print("Here_3")
+                self.search_mode()
             cv2.imshow("Hand Tracking with ZED Depth", self.frame)
             cv2.waitKey(1)
+            
 
 
     def calculate_orientation(self):
@@ -436,6 +461,9 @@ class RobotTrajectoryLogger(Node):
             },
             "Tracking": {
                     "Success": self.tracking_success 
+            },
+            "Time": {
+                    "Time": time.time() - self.global_time
             }
             
         }
