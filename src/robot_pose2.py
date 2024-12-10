@@ -51,7 +51,6 @@ class RobotTrajectoryLogger(Node):
         self.ee_pose = Pose()
         self.f_ext = Wrench()
         self.results=None
-        np.set_printoptions(precision=8)
         self.transformation_matrix=np.eye(4)
         self.zero_pos =[0.2, 0.2, 0.3] #[0.4, 0.0, 0.4] 
         self.zero_orientation = [0.7071,    0.7071, 0.0, 0.0] 
@@ -66,28 +65,35 @@ class RobotTrajectoryLogger(Node):
         self.ee_euler_angles = quaternion_to_euler([self.ee_pose.orientation._x, self.ee_pose.orientation._y, self.ee_pose.orientation._z, self.ee_pose.orientation._w])
         self.reference_euler_angles = quaternion_to_euler([self.reference_pose.orientation._x, self.reference_pose.orientation._y, self.reference_pose.orientation._z, self.reference_pose.orientation._w])
         self.start = True   
-        self.memory_points = 8
+        self.memory_points = 6
         self.last_hand_points = np.zeros([3,self.memory_points])
         self.replacement_time = 3 # Seconds
         self.prev_case = 0   # 0 if hand was tracked, 1 if hand is lost, 2 if lost on the way back to zero
         self.tracking_success = False
         self.min_z = 0
-        self.min_d = 0.3 # Distance from last known point to camera position.
+        self.min_d = 0.5 # Distance from last known point to camera position.
         self.trajectory = []
         self.transf_matrix_0_Cam=np.eye(4)
         self.transf_matrix_EE_Cam=np.array([[0,-1, 0, 0],[1,0 , 0,-0.15],[0, 0, 1, 0.122],[0, 0, 0, 1]])
         self.last_success_pos = np.zeros(3)
         self.target = np.zeros(3)
-        self.ball_Radius_back = 0.03 #m 
-        self.ball_Radius_static = 0.02
-        self.hand_image_ratio = 0.12
+        self.ball_Radius_back = 0.04 #m 
+        self.ball_Radius_static = 0.04
+        self.hand_image_ratio = 0.09
         self.wait_time = time.time()
-        self.lower_red = np.array([0, 130, 80])
+        self.lower_red = np.array([0, 140, 90])
         self.upper_red = np.array([10, 255, 255])        
-        self.lower_yellow = np.array([22, 100, 100])  
+        self.lower_yellow = np.array([20, 100, 100])  
         self.upper_yellow = np.array([28, 255, 255])  
-        self.proximity_threshold = 100
+        self.proximity_threshold_radius = 0.04 #[m]
         self.zoom_in = False
+        self.frames_lost_hand_max = 5
+        self.frames_lost_hand = 0 
+        self.search_radius = 1.5
+        self.search_radius_distance = 1.5
+
+
+        
         timestamp = datetime.now().strftime("%Y_%m_%d_%H%M")
         self.log_file = (f"robot_state_log_{timestamp}.json")
         print(self.log_file)
@@ -189,186 +195,6 @@ class RobotTrajectoryLogger(Node):
         
         self.calculate_traj(self.last_t_point)
         self.time_start=time.time()
-    def get_indice(self):
-        for hand_idx, hand_landmarks in enumerate(self.results.multi_hand_landmarks):
-            print("hand index: ", hand_idx)
-            # Wrist landmark index in MediaPipe
-            self.start=False
-            self.hand = self.results.multi_hand_landmarks[self.indice]
-            self.wrist = self.hand.landmark[0]
-            self.index = self.hand.landmark[5]
-            confidence = self.results.multi_handedness[0].classification[0].score
-            print(f"Hand detection confidence: {confidence}")
-            self.wrist_x = int(self.wrist.x * self.frame.shape[1])
-            self.wrist_y = int(self.wrist.y * self.frame.shape[0])
-            self.index_x = int(self.index.x * self.frame.shape[1])
-            self.index_y = int(self.index.y * self.frame.shape[0])
-
-            close_to_red = any(
-                abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= self.proximity_threshold
-                for contour in self.contours_red
-            )
-
-            # Check proximity to yellow contours
-            close_to_yellow = any(
-                abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= self.proximity_threshold
-                for contour in self.contours_yellow
-            )
-
-            # If close to both red and yellow contours, add the hand index to the list
-            if close_to_red and close_to_yellow:
-                self.indice = hand_idx
-                return 1
-        return 0
-    def search_mode(self):
-        self.tracking_success= False
-        self.zoom_in = True
-        if self.prev_case == 2 and self.inside_ball(self.ball_Radius_back):
-
-            self.calculate_traj(self.last_success_pos)
-            self.time_start=time.time()
-            self.send_trajectory(time.time() - self.time_start)
-            print("Lost on the way back")
-            self.prev_case = 1
-
-        elif self.prev_case == 0 and self.inside_ball(self.ball_Radius_static):
-
-            target = self.q
-            target[:2] = self.q[:2] + 0.3*(self.last_hand_points[:2,-1] - self.q[:2])
-            target[2] += 0.3
-            self.calculate_traj(target)
-            self.time_start=time.time()
-            self.send_trajectory(time.time() - self.time_start)
-            self.prev_case = 1
-            print("static cas") 
-
-        elif self.prev_case == 0 or self.prev_case == 2:
-
-            self.find_hand()
-            self.send_trajectory(time.time() - self.time_start)
-            print("mov case")   
-
-        elif (time.time() - self.time_start) <= self.replacement_time:
-            self.send_trajectory(time.time() - self.time_start)
-
-        elif (time.time() - self.time_start) <= self.replacement_time + 2:
-            #just wait
-             print("wait")
-        else:
-            print('Couldnt find hand')
-            exit()
-        self.wait_time = time.time()
-
-
-
-
-
-    def run_tracking(self):
-        if self.first:
-            self.first = False
-            self.pose_publisher.publish(self.reference_pose)
-            time.sleep(2)
-            while True:
-                self.pose_publisher.publish(self.reference_pose)
-                self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
-                self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
-                self.frame = self.image_zed.get_data()
-                self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
-                self.results = self.hands.process(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB))
-                cv2.imshow("Hand Tracking with ZED Depth", self.frame)
-                cv2.waitKey(1)
-
-                if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
-                    if self.results.multi_hand_landmarks:
-                        print('Hand detected')
-                        break
-               
-        if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
-
-            # Retrieve image and depth data
-            self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
-            self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
-            self.frame = self.image_zed.get_data()
-            self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
-            self.frame_copy = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
-            # Process the image with MediaPipe
-            self.results = self.hands.process(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB))
-            
-            #mask colour
-            mask_red = cv2.inRange(self.frame_copy, self.lower_red, self.upper_red)
-            mask_yellow = cv2.inRange(self.frame_copy, self.lower_yellow, self.upper_yellow)
-            self.contours_red, _ = cv2.findContours(mask_red, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            self.contours_yellow, _ = cv2.findContours(mask_yellow, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            for contour in self.contours_red:
-                cv2.drawContours(self.frame, [contour], -1, (0, 0, 255), 2)  # Red color in BGR
-            for contour in self.contours_yellow:
-                cv2.drawContours(self.frame, [contour], -1, (0, 255, 255), 2)  # Blue color in BGR
-
-            self.indice = 0
-            if self.results.multi_hand_landmarks and self.get_indice():
-
-
-                if self.wrist_x > 0 and self.wrist_y > 0 and index_x > 0 and index_y > 0:
-                    self.tracking_success= True
-                    self.depth_value = self.depth_map.get_value(self.wrist_x, self.wrist_y)[1]      
-                    self.z=self.depth_value/1000
-                    self.x=(self.wrist_x-self.left_cam_info.cx)*self.z/self.left_cam_info.fx
-                    self.y=(self.wrist_y-self.left_cam_info.cy)*self.z/self.left_cam_info.fy
-
-                    if not np.isnan(self.depth_value) and not np.isinf(self.depth_value):
-                        current_hand_point= np.dot(self.transf_matrix_0_Cam,np.transpose([self.x, self.y, self.z, 1]))
-                        self.last_hand_points=np.roll(self.last_hand_points, -1)
-                        self.last_hand_points[:,-1] = current_hand_point[:3]
-                        self.last_success_pos = self.q[:3]
-                        cv2.putText(self.frame, f'({current_hand_point[0]},{current_hand_point[1]},{current_hand_point[2]})', (self.wrist_x, self.wrist_y - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-                        if not self.start and (time.time() - self.wait_time > 1.5*self.replacement_time):
-                            if self.prev_case == 2 and  (time.time() - self.time_start) <= self.replacement_time :
-                                self.send_trajectory(time.time() - self.time_start)
-                            elif self.prev_case == 1 and not self.inside_ball(self.ball_Radius_back):
-                                self.calculate_traj(self.zero_pos)
-                                print("here:", self.zero_pos)
-                                self.time_start=time.time()
-                                self.send_trajectory(time.time() - self.time_start)
-                                self.prev_case = 2
-                            elif (time.time() - self.time_start) <= self.replacement_time + 1:
-                                self.reference_pose.position.x =  self.zero_pos[0] 
-                                self.reference_pose.position.y =  self.zero_pos[1] 
-                                self.reference_pose.position.z =  self.zero_pos[2]
-                                self.reference_pose.orientation.w = self.zero_orientation[0] 
-                                self.reference_pose.orientation.x = self.zero_orientation[1] 
-                                self.reference_pose.orientation.y = self.zero_orientation[2] 
-                                self.reference_pose.orientation.z = self.zero_orientation[3] 
-                                self.pose_publisher.publish(self.reference_pose)
-                                
-                            self.zoom_in= False
-                        elif not self.start and self.zoom_in:
-                            if np.linalg.norm(np.array([self.index.x -self.wrist.x, self.index.y - self.wrist.y])) < self.hand_image_ratio  :
-                                direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
-                                distance = np.linalg.norm(direction)  # Calculate the distance
-                        
-                                step = 0.01 * (direction / distance)  # Normalize and scale by step size
-                                self.reference_pose.position.x += step[0]
-                                self.reference_pose.position.y += step[1]
-                                self.reference_pose.position.z += step[2]
-                                self.calculate_orientation()
-                                self.pose_publisher.publish(self.reference_pose)
-                                print("come closer")
-                        self.prev_case = 0
-                    else:
-                        print("Here_1")
-                        self.search_mode()      
-                else:
-                    print("Here_2")
-                    self.search_mode()   
-            else:
-                print("Here_3")
-                self.search_mode()
-            cv2.imshow("Hand Tracking with ZED Depth", self.frame)
-            cv2.waitKey(1)
-            
-
 
     def calculate_orientation(self):
         ref_orient=[self.reference_pose.position.x, self.reference_pose.position.y, self.reference_pose.position.z]
@@ -394,8 +220,6 @@ class RobotTrajectoryLogger(Node):
         self.reference_pose.orientation._z = ref_quaternion[2]
         self.reference_pose.orientation._w = ref_quaternion[3]
         self.reference_euler_angles = rotation.as_euler('xyz', degrees=False)
-        
-        
 
     def send_trajectory(self,current_time):
         time_vec = np.array([1, current_time, current_time**2, current_time**3, current_time**4, current_time**5])
@@ -418,6 +242,214 @@ class RobotTrajectoryLogger(Node):
         
         # Check if all distances are within the radius
         return np.all(distances <= radius)
+       
+    def get_indice(self):
+        for hand_idx, hand_landmarks in enumerate(self.results.multi_hand_landmarks):
+            #print("hand index: ", hand_idx)
+            # Wrist landmark index in MediaPipe
+            self.start=False
+            self.hand = self.results.multi_hand_landmarks[hand_idx]
+            self.wrist = self.hand.landmark[0]
+            self.index = self.hand.landmark[5]
+            #confidence = self.results.multi_handedness[0].classification[0].score
+            #print(f"Hand detection confidence: {confidence}")
+            self.wrist_x = int(self.wrist.x * self.frame.shape[1])
+            self.wrist_y = int(self.wrist.y * self.frame.shape[0])
+            self.index_x = int(self.index.x * self.frame.shape[1])
+            self.index_y = int(self.index.y * self.frame.shape[0])
+
+            if self.wrist_x > 0 and self.wrist_y > 0 and self.index_x > 0 and self.index_y > 0:
+                self.tracking_success= True
+                self.depth_value = self.depth_map.get_value(self.wrist_x, self.wrist_y)[1]  
+                if not np.isnan(self.depth_value) and not np.isinf(self.depth_value) and not self.depth_value == 0:   
+                    self.z=self.depth_value/1000
+                    self.x=(self.wrist_x-self.left_cam_info.cx)*self.z/self.left_cam_info.fx
+                    self.y=(self.wrist_y-self.left_cam_info.cy)*self.z/self.left_cam_info.fy
+                    
+                    radius_pixel = self.proximity_threshold_radius * self.left_cam_info.fx/self.z
+                    print("Radius Pixel: ", radius_pixel)
+                    close_to_red = any(
+                        abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= radius_pixel
+                        for contour in self.contours_red
+                    )
+
+                    # Check proximity to yellow contours
+                    close_to_yellow = any(
+                        abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= radius_pixel
+                        for contour in self.contours_yellow
+                    )
+                
+                    # If close to both red and yellow contours, add the hand index to the list
+                    if close_to_red and close_to_yellow:
+                        self.indice = hand_idx
+                        return 1
+            else:
+                return 0
+
+        return 0
+    def search_mode(self):
+        self.tracking_success= False
+        
+        if self.prev_case == 2 and self.inside_ball(self.ball_Radius_back) :
+            self.calculate_traj(self.last_success_pos+[0,0,0.2])
+            self.time_start=time.time()
+            self.send_trajectory(time.time() - self.time_start)
+            self.prev_case = 1
+            print("Lost on the way back")
+        elif self.prev_case == 0 and self.inside_ball(self.ball_Radius_static):
+
+            target = self.q
+            target[:2] = self.q[:2] + 0.3*(self.last_hand_points[:2,-1] - self.q[:2])
+            target[2] += 0.3
+            self.calculate_traj(target)
+            self.time_start=time.time()
+            self.send_trajectory(time.time() - self.time_start)
+            self.prev_case = 1
+            print("static")
+
+        elif self.prev_case == 0 or self.prev_case == 2 :
+
+            self.find_hand()
+            self.send_trajectory(time.time() - self.time_start)
+            print("sfC")
+
+        elif (time.time() - self.time_start) <= self.replacement_time:
+            self.send_trajectory(time.time() - self.time_start)
+            print("next step")
+
+        elif (time.time() - self.time_start) <= self.replacement_time + 2:
+            #just wait
+             print("wait")
+        else:
+            print('Couldnt find hand')
+            print('Start random search')
+            self.random_search()
+            #exit()
+        self.wait_time = time.time()
+
+    def circle(self):
+
+        
+    def random_search(self):
+        self.calculate_orientation()
+
+
+
+    def run_tracking(self):
+        
+        if self.first:
+            self.first = False
+            self.pose_publisher.publish(self.reference_pose)
+            time.sleep(2)
+            while True:
+                self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
+                self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
+                self.frame = self.image_zed.get_data()
+                self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+                self.frame_copy = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
+                self.results = self.hands.process(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB))
+                #mask colour
+                mask_red = cv2.inRange(self.frame_copy, self.lower_red, self.upper_red)
+                mask_yellow = cv2.inRange(self.frame_copy, self.lower_yellow, self.upper_yellow)
+                self.contours_red, _ = cv2.findContours(mask_red, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                self.contours_yellow, _ = cv2.findContours(mask_yellow, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in self.contours_red:
+                    cv2.drawContours(self.frame, [contour], -1, (0, 0, 255), 2)  # Red color in BGR
+                for contour in self.contours_yellow:
+                    cv2.drawContours(self.frame, [contour], -1, (0, 255, 255), 2)  # Blue color in BGR
+
+                cv2.imshow("Hand Tracking with ZED Depth", self.frame)
+                cv2.waitKey(1)
+
+                if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+                    if self.results.multi_hand_landmarks and self.get_indice():
+                        print('Hand detected')
+                        break
+               
+        if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+
+            # Retrieve image and depth data
+            self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
+            self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
+            self.frame = self.image_zed.get_data()
+            self.frame = cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+            self.frame_copy = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
+            # Process the image with MediaPipe
+            self.results = self.hands.process(cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB))
+            #mask colour
+            mask_red = cv2.inRange(self.frame_copy, self.lower_red, self.upper_red)
+            mask_yellow = cv2.inRange(self.frame_copy, self.lower_yellow, self.upper_yellow)
+            self.contours_red, _ = cv2.findContours(mask_red, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            self.contours_yellow, _ = cv2.findContours(mask_yellow, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in self.contours_red:
+                cv2.drawContours(self.frame, [contour], -1, (0, 0, 255), 2)  # Red color in BGR
+            for contour in self.contours_yellow:
+                cv2.drawContours(self.frame, [contour], -1, (0, 255, 255), 2)  # Blue color in BGR
+
+            
+            self.indice = 0
+            if self.results.multi_hand_landmarks and self.get_indice():
+                
+                current_hand_point= np.dot(self.transf_matrix_0_Cam,np.transpose([self.x, self.y, self.z, 1]))
+                self.last_hand_points=np.roll(self.last_hand_points, -1)
+                self.last_hand_points[:,-1] = current_hand_point[:3]
+                self.last_success_pos = self.q[:3]
+                cv2.putText(self.frame, f'({current_hand_point[0]},{current_hand_point[1]},{current_hand_point[2]})', (self.wrist_x, self.wrist_y - 10), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                if not self.start and (time.time() - self.wait_time > 1.5*self.replacement_time):
+                    if self.prev_case == 2 and  (time.time() - self.time_start) <= self.replacement_time :
+                        self.send_trajectory(time.time() - self.time_start)
+                    elif not np.array_equal(np.array([self.reference_pose.position.x,self.reference_pose.position.y,self.reference_pose.position.z]),  self.zero_pos) and not self.inside_ball(self.ball_Radius_back):
+                        self.calculate_traj(self.zero_pos)
+                        print("here:", self.zero_pos)
+                        self.time_start=time.time()
+                        self.send_trajectory(time.time() - self.time_start)
+                        self.prev_case = 2
+                    elif (time.time() - self.time_start) <= self.replacement_time + 1:
+                        self.reference_pose.position.x =  self.zero_pos[0] 
+                        self.reference_pose.position.y =  self.zero_pos[1] 
+                        self.reference_pose.position.z =  self.zero_pos[2]
+                        self.reference_pose.orientation.w = self.zero_orientation[0] 
+                        self.reference_pose.orientation.x = self.zero_orientation[1] 
+                        self.reference_pose.orientation.y = self.zero_orientation[2] 
+                        self.reference_pose.orientation.z = self.zero_orientation[3] 
+                        self.pose_publisher.publish(self.reference_pose)
+                        self.prev_case = 0
+                        
+                    self.zoom_in= False
+                elif not self.start and self.zoom_in:
+                    self.prev_case = 0
+                    if np.linalg.norm(np.array([self.index.x -self.wrist.x, self.index.y - self.wrist.y])) < self.hand_image_ratio  :
+                        direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
+                        distance = np.linalg.norm(direction)  # Calculate the distance
+                
+                        step = 0.01 * (direction / distance)  # Normalize and scale by step size
+                        self.reference_pose.position.x += step[0]
+                        self.reference_pose.position.y += step[1]
+                        self.reference_pose.position.z += step[2]
+                        self.calculate_orientation()
+                        self.pose_publisher.publish(self.reference_pose)
+                        print("come closer")
+                    else:
+                        self.zoom_in =False
+                self.frames_lost_hand = 0 
+                
+            
+            elif not self.start:
+                print("Here_3")
+                if  self.frames_lost_hand >= self.frames_lost_hand_max:
+                        self.search_mode()
+                else:
+                    self.frames_lost_hand += 1
+                self.zoom_in = True
+            
+            cv2.imshow("Hand Tracking with ZED Depth", self.frame)
+            cv2.waitKey(1)
+            
+
+
+ 
 
     def robot_state_callback(self, msg: FrankaRobotState):
         self.f_ext = msg._o_f_ext_hat_k._wrench  # Assuming this is the correct attribute
