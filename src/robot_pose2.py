@@ -89,11 +89,14 @@ class RobotTrajectoryLogger(Node):
         self.zoom_in = False
         self.frames_lost_hand_max = 5
         self.frames_lost_hand = 0 
-        self.search_radius = 1.5
+        self.search_radius = 1.0
         self.search_radius_distance = 1.5
+        self.t_random_search =  12
+        self.random_s_case = 0
+        self.random_pos = np.array([self.zero_pos,[0.2, 0.0, 0.7],[0.5, -0.2, 0.6]])
 
 
-        
+
         timestamp = datetime.now().strftime("%Y_%m_%d_%H%M")
         self.log_file = (f"robot_state_log_{timestamp}.json")
         print(self.log_file)
@@ -267,7 +270,6 @@ class RobotTrajectoryLogger(Node):
                     self.y=(self.wrist_y-self.left_cam_info.cy)*self.z/self.left_cam_info.fy
                     
                     radius_pixel = self.proximity_threshold_radius * self.left_cam_info.fx/self.z
-                    print("Radius Pixel: ", radius_pixel)
                     close_to_red = any(
                         abs(cv2.pointPolygonTest(contour, (self.wrist_x, self.wrist_y), True)) <= radius_pixel
                         for contour in self.contours_red
@@ -287,6 +289,7 @@ class RobotTrajectoryLogger(Node):
                 return 0
 
         return 0
+    
     def search_mode(self):
         self.tracking_success= False
         
@@ -296,6 +299,7 @@ class RobotTrajectoryLogger(Node):
             self.send_trajectory(time.time() - self.time_start)
             self.prev_case = 1
             print("Lost on the way back")
+            self.wait_time = time.time()
         elif self.prev_case == 0 and self.inside_ball(self.ball_Radius_static):
 
             target = self.q
@@ -306,32 +310,83 @@ class RobotTrajectoryLogger(Node):
             self.send_trajectory(time.time() - self.time_start)
             self.prev_case = 1
             print("static")
+            self.wait_time = time.time()
 
         elif self.prev_case == 0 or self.prev_case == 2 :
 
             self.find_hand()
             self.send_trajectory(time.time() - self.time_start)
-            print("sfC")
+            print("dynamic")
+            self.wait_time = time.time()
 
         elif (time.time() - self.time_start) <= self.replacement_time:
             self.send_trajectory(time.time() - self.time_start)
             print("next step")
+            self.wait_time = time.time()
 
         elif (time.time() - self.time_start) <= self.replacement_time + 2:
             #just wait
              print("wait")
+             self.wait_time = time.time()
         else:
             print('Couldnt find hand')
             print('Start random search')
             self.random_search()
-            #exit()
-        self.wait_time = time.time()
+                #exit()
+        
 
-    def circle(self):
-
+    def traj_circle(self):
+        t=time.time()- self.wait_time - 2
+        target = np.zeros(3)
+        if self.random_s_case == 0 or self.random_s_case == 2:
+            target[0]  = self.reference_pose.position.x + 2*self.search_radius*np.cos(2*np.pi/self.t_random_search*t)
+            target[1]  = self.reference_pose.position.y + np.sign(self.random_s_case - 1)*self.search_radius_distance
+            target[2]  = self.reference_pose.position.z + self.search_radius*np.sin(2*np.pi/self.t_random_search*t)-0.6
+        else:
+            target[0]  = self.reference_pose.position.x + 2*self.search_radius*np.cos(2*np.pi/self.t_random_search*t)
+            target[1]  = self.reference_pose.position.y + 2*self.search_radius*np.sin(2*np.pi/self.t_random_search*t)
+            target[2]  = self.reference_pose.position.z - self.search_radius_distance
+        return target
+        
         
     def random_search(self):
-        self.calculate_orientation()
+        if time.time() - self.wait_time >= self.t_random_search + 2 :
+            self.wait_time = time.time()
+            if np.size(self.random_pos,1) > self.random_s_case + 1:
+                self.random_s_case += 1
+            else:
+                self.random_s_case = 0
+            
+            if self.random_s_case == 0 or self.random_s_case == 2:
+                self.reference_pose.position.x = self.random_pos[self.random_s_case][0]
+                self.reference_pose.position.y = self.random_pos[self.random_s_case][1]
+                self.reference_pose.position.z = self.random_pos[self.random_s_case][2] 
+                self.reference_pose.orientation.w = np.sign(1 - self.random_s_case ) * self.zero_orientation[0] 
+                self.reference_pose.orientation.x = self.zero_orientation[1] 
+                self.reference_pose.orientation.y = self.zero_orientation[2] 
+                self.reference_pose.orientation.z = self.zero_orientation[3] 
+                print(self.reference_pose.orientation)
+            else:
+                self.reference_pose.position.x = self.random_pos[1][0]
+                self.reference_pose.position.y = self.random_pos[1][1]
+                self.reference_pose.position.z = self.random_pos[1][2] 
+                self.reference_pose.orientation.w = 0.0
+                self.reference_pose.orientation.x = 1.0
+                self.reference_pose.orientation.y = 0.0
+                self.reference_pose.orientation.z = 0.0
+
+ 
+            self.pose_publisher.publish(self.reference_pose)
+
+        elif time.time() - self.wait_time >=  2.0:
+            target = self.traj_circle()
+            self.last_hand_points[:3,-1] = target 
+            self.reference_pose.position.x = self.random_pos[self.random_s_case][0]
+            self.reference_pose.position.y = self.random_pos[self.random_s_case][1]
+            self.reference_pose.position.z = self.random_pos[self.random_s_case][2]
+            self.calculate_orientation() 
+            self.pose_publisher.publish(self.reference_pose)
+       
 
 
 
@@ -367,7 +422,7 @@ class RobotTrajectoryLogger(Node):
                         break
                
         if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
-
+            
             # Retrieve image and depth data
             self.zed.retrieve_image(self.image_zed, sl.VIEW.LEFT)
             self.zed.retrieve_measure(self.depth_map, sl.MEASURE.DEPTH)
@@ -389,7 +444,7 @@ class RobotTrajectoryLogger(Node):
             
             self.indice = 0
             if self.results.multi_hand_landmarks and self.get_indice():
-                
+                #self.wait_time=time.time() #remove after testing
                 current_hand_point= np.dot(self.transf_matrix_0_Cam,np.transpose([self.x, self.y, self.z, 1]))
                 self.last_hand_points=np.roll(self.last_hand_points, -1)
                 self.last_hand_points[:,-1] = current_hand_point[:3]
@@ -424,7 +479,7 @@ class RobotTrajectoryLogger(Node):
                         direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
                         distance = np.linalg.norm(direction)  # Calculate the distance
                 
-                        step = 0.01 * (direction / distance)  # Normalize and scale by step size
+                        step = 0.05 * (direction / distance)  # Normalize and scale by step size
                         self.reference_pose.position.x += step[0]
                         self.reference_pose.position.y += step[1]
                         self.reference_pose.position.z += step[2]
@@ -446,10 +501,6 @@ class RobotTrajectoryLogger(Node):
             
             cv2.imshow("Hand Tracking with ZED Depth", self.frame)
             cv2.waitKey(1)
-            
-
-
- 
 
     def robot_state_callback(self, msg: FrankaRobotState):
         self.f_ext = msg._o_f_ext_hat_k._wrench  # Assuming this is the correct attribute

@@ -1,2 +1,5 @@
 # Ignore all .log files
 *.json
+!endeffector-config.json
+
+

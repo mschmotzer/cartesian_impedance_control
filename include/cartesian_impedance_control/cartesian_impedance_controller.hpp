@@ -127,8 +127,8 @@ public:
     double gamma_p = 15;
     double gamma_d = 7.7;
     const Eigen::Matrix<double, 7, 1> q_0= (Eigen::VectorXd(7) << 0.109, -0.189, -0.104, -2.09, -0.0289, 1.90, 0.0189).finished();
-    const Eigen::Matrix<double, 7, 1> q_lower_limit = (Eigen::VectorXd(7) << -2.89725, -1.8326,-2.89725, -3.0718, -2.87979, 0.436332, -3.05433).finished();
-    const Eigen::Matrix<double, 7, 1> q_upper_limit = (Eigen::VectorXd(7) << 2.89725,1.8326, -2.89725, -0.122173, 2.87979, 4.62512, 3.05433).finished();
+    const Eigen::Matrix<double, 7, 1> q_lower_limit = (Eigen::VectorXd(7) << -2.79725, -1.7326,-2.79725, -2.9718, -2.77979, 0.536332, -3.05433).finished();
+    const Eigen::Matrix<double, 7, 1> q_upper_limit = (Eigen::VectorXd(7) << 2.79725,1.7326, 2.79725, -0.022173, 2.77979, 4.52512, 3.05433).finished();
     Eigen::Matrix<double, 6, 7> jacobian_tilde = Eigen::MatrixXd::Zero(6,7);
     Eigen::Matrix<double, 7, 1> h_joint_limits = Eigen::MatrixXd::Zero(7,1);
     Eigen::Matrix<double, 6, 1> x_dd_des = Eigen::MatrixXd::Zero(6,1);
