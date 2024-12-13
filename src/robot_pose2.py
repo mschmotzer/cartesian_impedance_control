@@ -53,7 +53,7 @@ class RobotTrajectoryLogger(Node):
         self.results=None
         self.transformation_matrix=np.eye(4)
         self.zero_pos =[0.2, 0.2, 0.3] #[0.4, 0.0, 0.4] 
-        self.zero_orientation = [0.7071,    0.7071, 0.0, 0.0] 
+        self.zero_orientation =  [0.7071,    0.7071, 0.0, 0.0] #[0.0,0.0,0.7071,-0.7071] #
         self.reference_pose.position.x =  self.zero_pos[0] #0.4
         self.reference_pose.position.y =  self.zero_pos[1] #0.7
         self.reference_pose.position.z =  self.zero_pos[2] #0.4
@@ -65,7 +65,7 @@ class RobotTrajectoryLogger(Node):
         self.ee_euler_angles = quaternion_to_euler([self.ee_pose.orientation._x, self.ee_pose.orientation._y, self.ee_pose.orientation._z, self.ee_pose.orientation._w])
         self.reference_euler_angles = quaternion_to_euler([self.reference_pose.orientation._x, self.reference_pose.orientation._y, self.reference_pose.orientation._z, self.reference_pose.orientation._w])
         self.start = True   
-        self.memory_points = 6
+        self.memory_points = 7
         self.last_hand_points = np.zeros([3,self.memory_points])
         self.replacement_time = 3 # Seconds
         self.prev_case = 0   # 0 if hand was tracked, 1 if hand is lost, 2 if lost on the way back to zero
@@ -79,7 +79,7 @@ class RobotTrajectoryLogger(Node):
         self.target = np.zeros(3)
         self.ball_Radius_back = 0.04 #m 
         self.ball_Radius_static = 0.04
-        self.hand_image_ratio = 0.09
+        self.hand_image_ratio = 0.07
         self.wait_time = time.time()
         self.lower_red = np.array([0, 140, 90])
         self.upper_red = np.array([10, 255, 255])        
@@ -95,11 +95,19 @@ class RobotTrajectoryLogger(Node):
         self.random_s_case = 0
         self.random_pos = np.array([self.zero_pos,[0.2, 0.0, 0.7],[0.5, -0.2, 0.6]])
 
-
-
         timestamp = datetime.now().strftime("%Y_%m_%d_%H%M")
-        self.log_file = (f"robot_state_log_{timestamp}.json")
-        print(self.log_file)
+        # Create the main folder named after the timestamp
+        self.main_folder = f"robot_state_log_{timestamp}"
+        os.makedirs(self.main_folder, exist_ok=True)
+
+        # Create an 'images' subfolder inside the main folder
+        self.images_folder = os.path.join(self.main_folder, "images")
+        os.makedirs(self.images_folder, exist_ok=True)
+
+        # Create the .json file inside the main folder with the same name as the folder
+        self.json_file_path = os.path.join(self.main_folder, f"{self.main_folder}.json")
+        with open(self.json_file_path, 'w') as json_file:
+            json_file.write("{}")  # Initialize with empty JSON object or your desired content
 
         #Tracking Attribute
         self.zed = sl.Camera()
@@ -413,8 +421,10 @@ class RobotTrajectoryLogger(Node):
                 for contour in self.contours_yellow:
                     cv2.drawContours(self.frame, [contour], -1, (0, 255, 255), 2)  # Blue color in BGR
 
+
                 cv2.imshow("Hand Tracking with ZED Depth", self.frame)
                 cv2.waitKey(1)
+                
 
                 if self.zed.grab(self.runtime_parameters) == sl.ERROR_CODE.SUCCESS:
                     if self.results.multi_hand_landmarks and self.get_indice():
@@ -452,6 +462,10 @@ class RobotTrajectoryLogger(Node):
                 cv2.putText(self.frame, f'({current_hand_point[0]},{current_hand_point[1]},{current_hand_point[2]})', (self.wrist_x, self.wrist_y - 10), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+                if not (0.05 < self.wrist.x and self.wrist.x < 0.95 and 0.05 < self.wrist.y and self.wrist.y < 0.95):
+                    self.calculate_orientation()
+                    self.pose_publisher.publish(self.reference_pose)
+                    
                 if not self.start and (time.time() - self.wait_time > 1.5*self.replacement_time):
                     if self.prev_case == 2 and  (time.time() - self.time_start) <= self.replacement_time :
                         self.send_trajectory(time.time() - self.time_start)
@@ -479,7 +493,7 @@ class RobotTrajectoryLogger(Node):
                         direction = current_hand_point[:3] - self.q  # Vector pointing to the hand
                         distance = np.linalg.norm(direction)  # Calculate the distance
                 
-                        step = 0.05 * (direction / distance)  # Normalize and scale by step size
+                        step = 0.01 * (direction / distance)  # Normalize and scale by step size
                         self.reference_pose.position.x += step[0]
                         self.reference_pose.position.y += step[1]
                         self.reference_pose.position.z += step[2]
@@ -500,6 +514,8 @@ class RobotTrajectoryLogger(Node):
                 self.zoom_in = True
             
             cv2.imshow("Hand Tracking with ZED Depth", self.frame)
+            image_file_path = os.path.join(self.images_folder, f"frame{time.time()}.jpg")  # Save as frame.jpg or name dynamically
+            cv2.imwrite(image_file_path, self.frame)
             cv2.waitKey(1)
 
     def robot_state_callback(self, msg: FrankaRobotState):
@@ -552,8 +568,10 @@ class RobotTrajectoryLogger(Node):
         }
 
         # Log data to file
-        with open(self.log_file, 'a') as f:
-            f.write(json.dumps(data_to_log) + '\n')
+        with open(self.json_file_path, 'a') as json_file:
+            json_file.write(json.dumps(data_to_log) + '\n')
+
+        
 
 def main(args=None):
     rclpy.init(args=args)
